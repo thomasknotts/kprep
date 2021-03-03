@@ -1,7 +1,7 @@
 #
 # KPrepFunctions.py
 # --------------------
-# Authors: Addison Smith and Derek Bush
+# Authors: Addison Smith, Josh Wilkerson, Derek Bush
 # Contributors: Anthony Gillepsie
 # Written to be run on python 2 or 3
 
@@ -11,6 +11,8 @@
 # addAAgo             Adds-in proper AA info into your Go Atom structure array
 # addMWgo             Adds-in MW data into your Go Atoms structure attay from mmtsb-generated top file
 # pegGenGo            Generates a Go-model PEG starting on a desired AA resID
+# mutateResidue       Mutates a given amino acid into given protein Atom array at specified AA resID
+# pegGenAllAtom       Generates an all atom PEG starting on the specfied AA resID
 # catPRM              concatenates all inputted .prm files into one .prm file
 # catRTF              concatenates all inputted .rtf files into one .rtf file
 # charmmPDBprep       Takes an un-modified .pdb from the website and generates one ready for CHARMM input
@@ -22,6 +24,11 @@
 # mbarEner_screen_to_box
 # mbarPrep_box_to_mbar
 # mbarPrep_box_and_nc_to_mbar
+# mbarPrep_box_and_nc_to_mbar_domain
+# shiftDCD
+# catDCD
+# catLog
+# excelPrep
 #--------------------------------------------------------
 # Note: to toggle VIM folds: put cursor at your location -> command mode -> "za"
 #       to create a fold: command mode -> ex. ":12,34fold" the numbers are line numbers
@@ -51,8 +58,8 @@ def penult_elem(elem) :
 # Function used for sorting the glob on the second element
 def second_elem(elem) :
     return int(elem.split(".")[1])#}}}
-#########################################################
-
+##########################################################
+    
 
 #--------- Prep Scripts for Pre-processing --------------
 ##################### addAAgo ###########################
@@ -172,7 +179,7 @@ def addMWgo (arrAtom, fileNameTop) :#{{{
 
 
 #################### pegGenGo ###########################
-def pegGenGo (arrAtom, arrBond, arrNonbonded, startAtom, kDa=-1, numPEG=-1, DBCOlinker=False, maxIt=50) :#{{{
+def pegGenGo (arrAtom, arrBond, arrNonbonded, startAtom, kDa=-1, numPEG=-1, DBCOlinker=False, maxIt=50, fittingFactor=0) :#{{{
     # Description: Go-model PEG generation w/ Purely-Repusive parameters. Will NOT modify function inputs.
     
     # Inputs:
@@ -264,6 +271,7 @@ def pegGenGo (arrAtom, arrBond, arrNonbonded, startAtom, kDa=-1, numPEG=-1, DBCO
             theta = random.uniform(0,1)*np.pi   # Range of theta = [0, pi]
             phi   = random.uniform(0,1)*np.pi*2 # Range of phi [0, 2pi]
             r     = PEG1[3] + PEG2[3]
+            if i == 0 and fittingFactor != 0 : r += fittingFactor
             
             # Convert to cartesian and shift into correct location
             PEG2[0] = PEG1[0] + r*np.sin(theta)*np.cos(phi)
@@ -370,6 +378,7 @@ def pegGenGo (arrAtom, arrBond, arrNonbonded, startAtom, kDa=-1, numPEG=-1, DBCO
         
         if countIt >= maxIt : 
             print("\nCRITICAL ERROR: Max iterations hit! No PEG was generated!\n")
+            quit()
             return arrAtom, arrBond, arrNonbonded
     # End For
     
@@ -378,6 +387,681 @@ def pegGenGo (arrAtom, arrBond, arrNonbonded, startAtom, kDa=-1, numPEG=-1, DBCO
 #########################################################
 
 
+#--------- All-Atom uAA mutation and PEGylation ---------
+################# Functions and Classes #################
+# Functions#{{{
+class Monomer:#{{{
+# Class to represent a PEG monomer. Contains Atoms (of the monomer) and the
+# Atoms removed both from this PEG monomer and from the previous monomer as
+# this Monomer is bound to the preceding Monomer (or protein, in the case of
+# the first Monomer). This information is used in backtracking when generating a
+# PEG. Also keeps track of the number of times the following Monomer has been
+# removed and a new one has been built from this one (also used in backtracking).
+    def __init__(self, atoms=None, atomRemovedPrev=None, atomRemoved=None):
+        self.atoms = atoms
+        self.atomRemovedPrev = atomRemovedPrev
+        self.atomRemoved = atomRemoved
+        self.timesBacktracked = 0 #Number of times this Monomer has been backtracked to with these atoms}}}
+    
+def getAtom(atoms, atomName, resSeq=-1):#{{{
+# Returns the atom with the matching name and resSeq from the Atoms specified.
+# If resSeq==-1 or is not specified, resSeq is ignored when finding the atom.
+    for atom in atoms:
+        if (resSeq == -1 or atom.resSeq == resSeq) and atom.atomName == atomName:
+            return atom#}}}
+
+def removeAtom(atoms, atomName, resSeq=-1):#{{{
+# Deletes the Atom with the matching name and resSeq from the Atoms specified.
+# If resSeq==-1 or is not specified, resSeq is ignored when finding the atom.
+    for i, atom in enumerate(atoms):    
+        if (resSeq == -1 or atom.resSeq == resSeq) and atom.atomName == atomName:
+            deleteIndex = i
+            break
+    del atoms[deleteIndex]#}}}
+
+def getCoords(atoms, name, resSeq=-1):#{{{
+# Returns the coordinates of the Atom with the matching name and resSeq from
+# the Atoms specified. If resSeq==-1 or is not specified, resSeq is ignored when 
+# finding the atom.
+    for atom in atoms:
+        if (resSeq == -1 or atom.resSeq == resSeq) and atom.atomName == name:
+            return copy.deepcopy(atom.coordinates)#}}}
+
+def getCCoords(atoms, resSeq=-1):#{{{
+# Returns the coordinates of the Atom with name ' C  ' and matching resSeq 
+# from the Atoms specified. If resSeq==-1 or is not specified, resSeq is ignored
+# when finding the atom.
+    return getCoords(atoms, ' C  ', resSeq)#}}}    
+
+def getNCoords(atoms, resSeq=-1):#{{{
+# Returns the coordinates of the Atom with name ' N  ' and matching resSeq 
+# from the Atoms specified. If resSeq==-1 or is not specified, resSeq is ignored
+# when finding the atom.
+    return getCoords(atoms, ' N  ', resSeq)#}}}    
+
+def getCACoords(atoms, resSeq=-1):#{{{
+# Returns the coordinates of the Atom with name ' CA ' and matching resSeq 
+# from the Atoms specified. If resSeq==-1 or is not specified, resSeq is ignored
+# when finding the atom.
+    return getCoords(atoms, ' CA ', resSeq)#}}}    
+
+def getRadius(atom):#{{{
+# Returns the radius based on the element of the specified Atom.
+# If element is not specified, attempts to guess the element
+# based on the atomName. This will not work perfectly for Atoms
+# with names longer than 2 letters, but should work for Atoms
+# typically found in organic compounds.
+    r_C = .70
+    r_H = .53
+    r_N = .65
+    r_O = .60
+    r_S = .100
+    r_other = 1.80
+    if atom.element != '':
+        element = atom.element
+    else:
+        element = ' ' + atom.atomName.lstrip()[0] 
+    if element == ' C': return r_C
+    elif element == ' H': return r_H
+    elif element == ' N': return r_N
+    elif element == ' O': return r_O
+    elif element == ' S': return r_S
+    else:
+        return r_other#}}}
+
+def getUnitVector(vec):#{{{
+# Returns the vector of magnitude 1 in the same direction
+# as the specified vector.
+    mag = getMagVector(vec)
+    u = vec/mag
+    return u#}}}
+
+def getMagVector(vec):#{{{
+# Returns the magnitude of the specified vector.
+    mag = np.sqrt(vec[0]**2 + vec[1]**2 + vec[2]**2)
+    return mag#}}}
+
+def getNtoCVector(atoms, resSeq=-1):#{{{
+# Returns the vector between Atoms named ' N  ' and ' C  ' and matching 
+# resSeq from the Atoms specified. If resSeq==-1 or is not specified, resSeq
+# is ignored when finding the atom.
+    N_coords = np.array(getNCoords(atoms, resSeq))
+    C_coords = np.array(getCCoords(atoms, resSeq))
+    vec = C_coords - N_coords
+    return vec#}}}
+
+def getNtoCUnitVector(atoms, resSeq=-1):#{{{
+# Returns the vector of magnitude 1 and in the same direction as the 
+# vector between Atoms named ' N  ' and ' C  ' and matching resSeq from
+# the Atoms specified. If resSeq==-1 or is not specified, resSeq is ignored
+# when finding the atom.
+    vec = getNtoCVector(atoms, resSeq)
+    return getUnitVector(vec)#}}}
+
+def getCAtoXVector(atoms, name, resSeq=-1):#{{{
+# Returns the vector between Atoms named ' CA ' and the specified name and 
+# matching resSeq from the Atoms specified. If resSeq==-1 or is not specified,
+# resSeq is ignored when finding the atom.
+    CA_coords = np.array(getCACoords(atoms, resSeq))
+    X_coords = np.array(getCoords(atoms, name, resSeq))
+    vec = X_coords - CA_coords
+    return vec#}}}
+
+def getCAtoXUnitVector(atoms, name, resSeq=-1):#{{{
+# Returns the vector of magnitude 1 and in the same direction as the 
+# vector between Atoms named ' CA ' and the specified name and matching resSeq from
+# the Atoms specified. If resSeq==-1 or is not specified, resSeq is ignored
+# when finding the atom.
+    vec = getCAtoXVector(atoms, name, resSeq)
+    return getUnitVector(vec)#}}}
+
+def getBondUnitVector(monAtom, pegs, numPEGadded, atomNames, protAtom=None, resSeq=-1):#{{{
+# Returns the vector of magnitude 1 and in the same direction as the 
+# bond between the monomer given (monAtom) and the previous monomer (or protein, in the case
+# of the first monomer) from the Atoms specified.
+    if numPEGadded == 0:
+        oldBondAtom = getAtom(protAtom, atomNames["protBondAtom"], resSeq)
+    else:
+        oldBondAtom = getAtom(pegs[numPEGadded-1].atoms, atomNames["pegBondAtomBack"])
+    newBondAtom = getAtom(monAtom, atomNames["pegBondAtomFront"])
+    vect = newBondAtom.coordinates - oldBondAtom.coordinates
+    return getUnitVector(vect)#}}}
+
+def getAlignmentRotationMatrix(a, b):#{{{
+# Returns rotation matrix to align unit vector a with unit vector b
+# Matrix is designed to rotate a onto b, not vice versa
+    I = np.identity(3)
+    v = np.cross(a, b)
+    v_x = np.array([[0, -v[2], v[1]],[v[2], 0, -v[0]],[-v[1], v[0], 0]])
+    v_x_2 = np.dot(v_x, v_x)
+    c = np.dot(a,b)
+    R = I + v_x + v_x_2*(1/(1+c))
+    return R#}}}
+
+def shiftAtoms(atoms, shift):#{{{
+# Shifts the specified atoms' coordinates by the shift vector specified
+    for atom in atoms:
+        atom.coordinates = atom.coordinates + shift#}}}
+
+def scaleAtoms(atoms, scale):#{{{
+# Multiplies the specified atoms' coordinates by the scale factor specified
+    for atom in atoms:
+        atom.coordinates = atom.coordinates * scale#}}}
+
+def rotateAtoms(R, atoms):#{{{
+# Rotates the specified atoms' coordinates using the rotation matrix specified
+    for atom in atoms:
+        atom.coordinates = np.dot(R, np.array(atom.coordinates))#}}}
+
+def rotateResidue(resAtom, angle, u_vect):#{{{
+# U_VECT MUST BE A UNIT VECTOR!!! 
+# Rotates the specified atoms around unit vector u_vect by the specified angle.
+# Treats atom with name ' N  ' as the origin when performing the rotation.
+    ux = u_vect[0]
+    uy = u_vect[1]
+    uz = u_vect[2]
+    cos_ang = np.cos(angle)
+    sin_ang = np.sin(angle)
+    rotationMatrix = np.array([[cos_ang+ux**2*(1-cos_ang), ux*uy*(1-cos_ang)-uz*sin_ang, ux*uz*(1-cos_ang)+uy*sin_ang],\
+                        [uy*ux*(1-cos_ang)+uz*sin_ang, cos_ang+uy**2*(1-cos_ang), uy*uz*(1-cos_ang)-ux*sin_ang],\
+                        [uz*ux*(1-cos_ang)-uy*sin_ang, uz*uy*(1-cos_ang)+ux*sin_ang, cos_ang+uz**2*(1-cos_ang)]])
+    N_coords = getNCoords(resAtom)
+    shiftAtoms(resAtom, -np.array(N_coords))
+    for atom in resAtom:
+        atom.coordinates = np.dot(atom.coordinates, rotationMatrix)
+    shiftAtoms(resAtom, np.array(N_coords))#}}}
+
+def removeResidue(protAtom, resSeq):#{{{
+# Removes the residue with specified resSeq from the protein,
+# excluding the atoms with the names listed below.
+    atom_exclusions = {' N  ', ' C  ', ' HN ', ' O  '}
+    removeAtomIndexes = []
+    for i, atom in enumerate(protAtom):
+        if atom.resSeq == resSeq and not atom.atomName in atom_exclusions:
+            removeAtomIndexes.append(i)
+    for index in reversed(removeAtomIndexes):
+        protAtom.pop(index)#}}}
+
+def alignResidue(resAtom, protAtom, resSeq):#{{{
+# Aligns the atoms in resAtom with the residue they will be replacing
+# in protAtom, specified byt resSeq. This includes rotating the atoms
+# to align N and C in resAtom with the corresponding N and C in protAtom
+# and shifting the atoms into the proper position. The residue is not
+# inserted into the protein in this function, but its bacbone is positioned
+# as if it were. There are likely clashes between the inserted residue
+# and the rest of the protein though.
+    a = getNtoCUnitVector(resAtom)  
+    b = getNtoCUnitVector(protAtom, resSeq)
+    R = getAlignmentRotationMatrix(a, b)
+    mag_res = getMagVector(getNtoCVector(resAtom))
+    mag_prot =  getMagVector(getNtoCVector(protAtom, resSeq))
+    N_res_coords = getNCoords(resAtom)
+    N_prot_coords = getNCoords(protAtom, resSeq)
+    shiftAtoms(resAtom, -1*np.array(N_res_coords))
+    scaleAtoms(resAtom, mag_prot/mag_res)
+    rotateAtoms(R, resAtom)
+    shiftAtoms(resAtom, np.array(N_prot_coords))#}}}
+
+def fitResidue(allAtom, resSeq, secondAtomName=' CB '):#{{{
+# Attempts to fit the residue specified by resSeq into the protein
+# without clashes by calling rotateResidue and rotateSideChain. A
+# printed warning statement is given if none of the combinations of
+# rotating the entire residue and the sidechain avoid clashes. The 
+# sidechain is rotated about the vector from the alpha carbon to
+# the second atom in the residue, specified by secondAtomName.
+    resRotations = 15
+    sideChainRotations = 15
+    resAngle = 2*np.pi/resRotations
+    sideChainAngle = 2*np.pi/sideChainRotations
+    resAtom = []
+    protAtom = []
+    for atom in allAtom:
+        if atom.resSeq == resSeq:
+            resAtom.append(atom)
+        else:
+            protAtom.append(atom)
+    u_vect = getNtoCUnitVector(allAtom, resSeq)
+    for i in range(resRotations):
+        rotateResidue(resAtom, resAngle, u_vect)
+        for j in range(sideChainRotations):
+            u_vect2 = getCAtoXUnitVector(resAtom, secondAtomName)
+            rotateSideChain(resAtom, sideChainAngle, u_vect2)
+            if not resClashes(resAtom, protAtom):
+                return
+    print("WARNING: The inserted residue clashes with the rest of the protein. Output may be invalid.")#}}}
+
+def insertResidue(resAtom, protAtom, resSeq):#{{{
+# Inserts all Atoms in resAtom into protAtom except for those listed
+# just below in atom_exclusions. No properties, including position, of
+# the Atoms in resAtom are modified.
+    atom_exclusions = {' N  ', ' C  ', ' HN ', ' O  '}
+    insertion_atom_name = ' N  '
+    for i, atom in enumerate(protAtom):
+        if atom.resSeq == resSeq and atom.atomName == insertion_atom_name:
+            insertIndex = i+1
+            break
+    for atom in reversed(resAtom):
+        if not atom.atomName in atom_exclusions:
+            protAtom.insert(insertIndex, atom)
+    renumberAtoms(protAtom)#}}}
+
+def rotateSideChain(resAtom, angle, u_vect):#{{{
+# The non-backbone Atoms in resAtom are rotated by the specified angle
+# about the vector specified (u_vect). This should be the vector from
+# CA to the second atom in the sidechain, usually CB. 
+    atom_exclusions = {' C  ', ' N  ', ' HN ', ' O  ', ' CA ', ' HA '}
+    ux = u_vect[0]
+    uy = u_vect[1]
+    uz = u_vect[2]
+    cos_ang = np.cos(angle)
+    sin_ang = np.sin(angle)
+    rotationMatrix = np.array([[cos_ang+ux**2*(1-cos_ang), ux*uy*(1-cos_ang)-uz*sin_ang, ux*uz*(1-cos_ang)+uy*sin_ang],\
+                        [uy*ux*(1-cos_ang)+uz*sin_ang, cos_ang+uy**2*(1-cos_ang), uy*uz*(1-cos_ang)-ux*sin_ang],\
+                        [uz*ux*(1-cos_ang)-uy*sin_ang, uz*uy*(1-cos_ang)+ux*sin_ang, cos_ang+uz**2*(1-cos_ang)]])
+    CA_coords = getCACoords(resAtom)
+    shiftAtoms(resAtom, -np.array(CA_coords))
+    for atom in resAtom:
+        if not atom.atomName in atom_exclusions:
+            atom.coordinates = np.dot(atom.coordinates, rotationMatrix)
+    shiftAtoms(resAtom, np.array(CA_coords))#}}}
+
+def alignMonomer(protAtom, pegAtom, pegs, numPEGadded, atomNames, resSeq=-1):#{{{
+# A new PEG Monomer is shifted and rotated so that its first carbon
+# atom is set to be along the same vector as one of the hydrogens of
+# the previous PEG Monomer. Additionally, one of the hydrogens of the
+# new PEG Monomer is set along this same vector. The result is that
+# the old PEG Monomer's C-H bond is now overlapped by an H-C bond of 
+# the new PEG Monomer. The bond length between the last carbon of the
+# previous PEG and the first carbon of the new PEG is set at 1.5. The
+# PEG atoms are not added to the PEG array, byt they are aligned so
+# they are ready to be.
+    pegAtom = copy.deepcopy(pegAtom)
+    newRemoveAtom = getAtom(pegAtom, atomNames["pegRemoveAtomFront"])
+    newBondAtom = getAtom(pegAtom, atomNames["pegBondAtomFront"])
+    if numPEGadded == 0:
+        oldRemoveAtom = getAtom(protAtom, atomNames["protRemoveAtom"], resSeq)
+        oldBondAtom = getAtom(protAtom, atomNames["protBondAtom"], resSeq)
+    else:
+        oldRemoveAtom = getAtom(pegs[numPEGadded-1].atoms, atomNames["pegRemoveAtomBack"])
+        oldBondAtom = getAtom(pegs[numPEGadded-1].atoms, atomNames["pegBondAtomBack"])
+    oldBondVector = np.array(oldBondAtom.coordinates) - np.array(oldRemoveAtom.coordinates) 
+    oldBondLength = getMagVector(oldBondVector)
+    newBondVector = np.array(newRemoveAtom.coordinates) - np.array(newBondAtom.coordinates)
+    newBondLength = 1.5
+    a = getUnitVector(newBondVector)
+    b = getUnitVector(oldBondVector)
+    R = getAlignmentRotationMatrix(a, b)
+    shiftAtoms(pegAtom, -np.array(newRemoveAtom.coordinates))
+    rotateAtoms(R, pegAtom)
+    shiftAtoms(pegAtom, -np.array(newBondAtom.coordinates))
+    newBondAtomCoords = (np.array(oldRemoveAtom.coordinates) - np.array(oldBondAtom.coordinates)) \
+                         *(newBondLength/oldBondLength) + np.array(oldBondAtom.coordinates)
+    shiftAtoms(pegAtom, newBondAtomCoords)
+    return pegAtom#}}}
+
+def fitMonomerAtom(monAtom, protAtom, pegs, numPEGadded, atomNames, resSeq=-1):#{{{
+# Calls rotateMonomerAtom so that the atoms of monAtom are rotated about the vector
+# between the previous PEG added and this one. This function should be called after
+# alignMonomerAtom so that the rotation is done properly. The rotation is done 
+# randomly and is attempted multiple times if there are clashes. Returns True if a 
+# non-clashing rotation is found, and False if not. This leads to a randomized 
+# direction of the PEG chain.
+    monRotations = 15
+    u_vect = getBondUnitVector(monAtom, pegs, numPEGadded, atomNames, protAtom, resSeq)
+    for i in range(monRotations):
+        angle = random.uniform(0, 2*np.pi)
+        rotateMonomerAtom(monAtom, angle, u_vect, atomNames)
+        if not pegClashes(protAtom, pegs, monAtom, numPEGadded, atomNames, resSeq):
+            return True
+    return False#}}}
+
+def addMonomer(protAtom, pegAtom, pegs, numPEGadded, atomNames, resSeq=-1):#{{{
+# Attemps to add another Monomer to the peg chain (pegs). It calls functions to 
+# align the monomer and also to rotate it randomly until it does not clash. 
+# Removes the atoms that are eliminated as the bond between PEG Monomers is
+# formed from the main Atom array and stores them separately in the Monomer.
+# Returns True if the Monomer is successfully added and False if not.
+    monAtom = alignMonomer(protAtom, pegAtom, pegs, numPEGadded, atomNames, resSeq)
+    if fitMonomerAtom(monAtom, protAtom, pegs, numPEGadded, atomNames, resSeq):
+        atomRemoved = getAtom(monAtom, atomNames["pegRemoveAtomFront"])
+        removeAtom(monAtom, atomNames["pegRemoveAtomFront"])
+        if numPEGadded == 0:
+            atomRemovedPrev = getAtom(protAtom, atomNames["protRemoveAtom"], resSeq)
+            removeAtom(protAtom, atomNames["protRemoveAtom"], resSeq)
+        else:
+            atomRemovedPrev = getAtom(pegs[numPEGadded-1].atoms, atomNames["pegRemoveAtomBack"])
+            removeAtom(pegs[numPEGadded-1].atoms, atomNames["pegRemoveAtomBack"])
+        pegs[numPEGadded].atoms = monAtom
+        pegs[numPEGadded].atomRemovedPrev = atomRemovedPrev
+        pegs[numPEGadded].atomRemoved = atomRemoved
+        return True
+    else:
+        return False#}}}
+
+def rotateMonomerAtom(monAtom, angle, u_vect, atomNames):#{{{
+# U_VECT MUST BE A UNIT VECTOR!!! 
+# The atoms of monAtom are rotated about the specified unit vector (u_vect) by the
+# specified angle. u_vect should be the unit bond vector between this Monomer and 
+# the preceding one.
+    ux = u_vect[0]
+    uy = u_vect[1]
+    uz = u_vect[2]
+    cos_ang = np.cos(angle)
+    sin_ang = np.sin(angle)
+    rotationMatrix = np.array([[cos_ang+ux**2*(1-cos_ang), ux*uy*(1-cos_ang)-uz*sin_ang, ux*uz*(1-cos_ang)+uy*sin_ang],\
+                        [uy*ux*(1-cos_ang)+uz*sin_ang, cos_ang+uy**2*(1-cos_ang), uy*uz*(1-cos_ang)-ux*sin_ang],\
+                        [uz*ux*(1-cos_ang)-uy*sin_ang, uz*uy*(1-cos_ang)+ux*sin_ang, cos_ang+uz**2*(1-cos_ang)]])
+    bondAtom = getAtom(monAtom, atomNames["pegBondAtomFront"])
+    bondAtomCoords = copy.deepcopy(bondAtom.coordinates)
+    shiftAtoms(monAtom, -bondAtomCoords)
+    for atom in monAtom:
+        atom.coordinates = np.dot(rotationMatrix, atom.coordinates)
+    shiftAtoms(monAtom, bondAtomCoords)#}}}
+
+def removeMonomer(pegs, numPEGadded, protAtom=None, resSeq=-1):#{{{
+# Removes the atoms of the last Monomer added and updates the number
+# of times the penultimate Monomer has been backtracked to.
+    if numPEGadded == 1:
+        protAtom.append(pegs[numPEGadded-1].atomRemovedPrev)
+    else:
+        pegs[numPEGadded-2].atoms.append(pegs[numPEGadded-1].atomRemovedPrev)
+    pegs[numPEGadded-1].atoms = None
+    pegs[numPEGadded-1].atomRemovedPrev = None
+    pegs[numPEGadded-1].atomRemoved = None
+    if numPEGadded > 1:
+        pegs[numPEGadded-2].timesBacktracked+=1#}}}
+
+def resClashes(resAtom, protAtom):#{{{
+# Determines if the residue in its current position clashes with
+# any other atoms in the protein, based on the atomic radius of 
+# each atom.
+    if selfClashes(resAtom):
+        return True
+    atom1_exclusions = {' C  ', ' N  ', ' CA '}
+    atom2_exclusions = {''}
+    for atom1 in resAtom:
+        if not atom1.atomName in atom1_exclusions: 
+            x1 = atom1.coordinates[0] 
+            y1 = atom1.coordinates[1] 
+            z1 = atom1.coordinates[2]
+            r1 = getRadius(atom1)
+            for atom2 in protAtom:
+                if not atom2.atomName in atom2_exclusions:
+                    x2 = atom2.coordinates[0] 
+                    y2 = atom2.coordinates[1] 
+                    z2 = atom2.coordinates[2]
+                    r2 = getRadius(atom2)
+                    distance = np.sqrt((x1-x2)**2 + (y1-y2)**2 + (z1-z2)**2)
+                    minDistance = r1 + r2
+                    if distance < minDistance:
+                        print(atom1.atomName, atom1.resSeq, atom1.coordinates, atom2.atomName, atom2.resSeq, atom2.coordinates)
+                        return True
+    return False#}}}
+
+def selfClashes(resAtom):#{{{
+# Determines if the sidechain of the residue in its current 
+# position clashes with the backbone of the same residue, based 
+# on the atomic radius of each atom. This function is likely not
+# extremely important anymore due to changes in the implementation
+# of the uAA mutation functions, but it does no harm to the 
+# mutation process.
+    sidechain_names = {' C  ', ' O  ', ' N  ', ' HN ', ' HA '} 
+    backbone_exclusions = {' CA '}
+    sidechainAtom = []
+    backboneAtom = []
+    for atom in resAtom:
+        if atom.atomName in sidechain_names:
+            sidechainAtom.append(atom)
+        elif not atom.atomName in backbone_exclusions:
+            backboneAtom.append(atom)
+    for atom1 in backboneAtom:
+        x1 = atom1.coordinates[0] 
+        y1 = atom1.coordinates[1] 
+        z1 = atom1.coordinates[2]
+        r1 = getRadius(atom1)
+        for atom2 in sidechainAtom:
+            x2 = atom2.coordinates[0] 
+            y2 = atom2.coordinates[1] 
+            z2 = atom2.coordinates[2]
+            r2 = getRadius(atom2)
+            distance = np.sqrt((x1-x2)**2 + (y1-y2)**2 + (z1-z2)**2)
+            minDistance = r1 + r2
+            if distance < minDistance:
+                print(atom1.atomName, atom1.resSeq, atom1.coordinates, atom2.atomName, atom2.resSeq, atom2.coordinates)
+                return True
+    return False#}}}
+
+def pegClashes(protAtom, pegs, testAtom, numPEGadded, atomNames, resSeq=-1):#{{{
+# Determines if the peg (testAtom) in its current position clashes with
+# any other atoms in the protein, based on the atomic radius of each atom.
+    atom1_exclusions = {atomNames["pegBondAtomFront"], atomNames["pegRemoveAtomFront"]}
+    if numPEGadded == 0:
+        atom2_exclusions = {atomNames["protBondAtom"], atomNames["protRemoveAtom"]}
+    else:
+        atom2_exclusions = {atomNames["pegBondAtomBack"], atomNames["pegRemoveAtomBack"]}
+    for atom1 in testAtom:
+        if not atom1.atomName in atom1_exclusions:
+            r1 = getRadius(atom1)
+            for i in range(numPEGadded):
+                for atom2 in pegs[i].atoms:
+                    if not (atom2.atomName in atom2_exclusions and i == numPEGadded-1):
+                        r2 = getRadius(atom2)
+                        vect = atom1.coordinates - atom2.coordinates
+                        distance = getMagVector(vect)
+                        minDistance = r1 + r2
+                        if distance < minDistance:
+                            return True
+            for atom2 in protAtom:
+                if not (atom2.atomName in atom2_exclusions and resSeq==atom2.resSeq):
+                    r2 = getRadius(atom2)
+                    vect = atom1.coordinates - atom2.coordinates
+                    distance = getMagVector(vect)
+                    minDistance = r1 + r2
+                    if distance < minDistance:
+                        return True
+    return False#}}}
+
+def modifyAtomProperties(allAtom, resAtom, resSeq, resName):#{{{
+# Changes resSeq, resType, chainType, resNum, o, and tf of atoms
+# in the protein and in the mutated residue appropriately to 
+# enable creation of a new PDB file. Should be called after the
+# residue is positioned correctly.
+    template_atom_name = ' N  '
+    for atom in resAtom:
+        atom.resSeq = resSeq
+    for atom in allAtom:
+       if atom.resSeq == resSeq and atom.atomName == template_atom_name:
+           template_atom = atom
+    chainID = template_atom.chainType
+    resNumID = template_atom.resNum
+    for atom in allAtom:
+        if atom.resSeq == resSeq:
+            atom.resType = resName
+            atom.chainType = chainID
+            atom.resSeq = resSeq
+            atom.resNum = resNumID
+            atom.o = 1.0
+            atom.tf = 0.0#}}}
+
+def renumberAtoms(atoms):#{{{
+# All atoms in the protein are renumbered from 1 to account for
+# the mutation of a residue in the protein.
+    for i, atom in enumerate(atoms):
+        atom.atomNum = i+1
+        atom.atomSeq = i+1#}}}
+
+def insertPEGAtoms(pegs, protAtom):#{{{
+# Properties resSeq, chainType, and atomSeq are added to all of the PEG
+# Atoms, and then the atoms are added into the protein in preparation
+# for creating a new PDB file.
+    allAtom = copy.copy(protAtom)
+    maxResSeq = 0
+    maxChainID = 'A'
+    maxAtomSeq = 0
+    for atom in protAtom:
+        if atom.chainType > maxChainID:
+            maxChainID = atom.chainType
+        if atom.atomSeq > maxAtomSeq:
+            maxAtomSeq = atom.atomSeq
+    
+    resSeq = maxResSeq + 1
+    chainID = chr(ord(maxChainID)+1)
+    atomSeq = maxAtomSeq + 1
+
+    for peg in pegs:
+        for atom in peg.atoms:
+            atom.resSeq = resSeq
+            atom.chainType = chainID
+            atom.atomSeq = atomSeq
+            allAtom.append(atom)
+            atomSeq += 1
+        resSeq += 1
+    return allAtom#}}}
+#}}}
+#########################################################
+
+
+################## mutateResidue #########################
+def mutateResidue(pAtom, rAtom, resSeq, resName, secAtomName=' CB '):#{{{
+    # Description: 
+    # Mutate an amino acid (typically uAA) into an all-atom protein at a specified position.
+    #     WARNING: The structure should be minimized after using this script!!!!!
+    #     WARNING: This function does not provide input paramter error checking!!!!!
+
+    # Inputs:
+    # pAtom        This is the array of KPI.Atoms for the protein
+    # rAtom        This is the array of KPI.Atoms for the amino acid that will be mutated in.
+    # resSeq       This is the resSeq of the amino acid in the protein that you would like to
+    #                  replace with the amino acid represented by rAtom.
+    # resName      This is the name of the residue that is being mutated into the protein, 
+    #                  typically a three character residue name, as in a PDB. We often use
+    #                  'PAZ'.
+    # secAtomName  This is the name of the second atom of the residue that is being mutated
+    #                  into the protein. The amino acid is rotated about the bond from CA to
+    #                  this atom to find a good fit when mutating the residue in. Typically,
+    #                  and by default, this is ' CB '.
+
+    # Actions:
+    # Given the proper inputs as mentioned above, will remove the residue specified.
+    # Will then insert the residue given (typically an uAA) at the same location.
+    # The residue will then be rotated so that it fits without clashing with any other atoms
+    #     in the protein Atom array. If there is absolutely no position and rotation that will 
+    #     avoid clashes, an error message will be printed, and a protein with the new residue
+    #     in a poor position will be generated. It may be possible to use the protein with 
+    #     minimization, but more likely is that there was an error in the inputs.
+    # Atom properties of both the protein and new residue are modified to create a useable
+    #     PDB file.
+    # Finally, an array of Atoms with the new residue replacing the old is returned, ready
+    # to be output as a PDB file.
+
+    # Outputs:
+    # An array of "KPI.Atoms" representing the mutated protein.
+
+    protAtom = copy.deepcopy(pAtom)
+    resAtom = copy.deepcopy(rAtom)
+    alignResidue(resAtom, protAtom, resSeq)
+    removeResidue(protAtom, resSeq)
+    insertResidue(resAtom, protAtom, resSeq)
+    modifyAtomProperties(protAtom, resAtom, resSeq, resName)
+    fitResidue(protAtom, resSeq, secAtomName)
+    return protAtom#}}}
+#########################################################
+
+
+################## pegGenAllAtom #########################
+def pegGenAllAtom(protAtom, pegAtom, resSeq, atomNames, numPEG):#{{{
+    # Description: 
+    # Generate a PEG of the specified number of monomers at the specified residue
+    #     amd atom of a protein.
+    #     WARNING: The structure should be minimized after using this script!!!!!
+    #     WARNING: This function does not provide input paramter error checking!!!!!
+
+    # Inputs:
+    # protAtom     This is the array of KPI.Atoms for the protein
+    # pegAtom      This is the array of KPI.Atoms used as a template for a PEG monomer. 
+    # resSeq       This is the resSeq of the amino acid in the protein where you would like
+    #                  to add PEG.
+    # atomNames    This is a dictionary that gives the names of all the atoms that will be 
+    #                  removed or bonded to other atoms as a result of PEGylation.
+    #              Needed entries:
+    #                  protRemoveAtom         Atom in protein that is removed when first PEG
+    #                                             is bonded to it. (Usually ' H* ')
+    #                  protBondAtom           Atom in protein that first PEG is bonded to.
+    #                                             (Usually ' C* ')
+    #                  pegRemoveAtomFront     Atom in PEG that is removed when PEG is bonded
+    #                                             to a previous atom. (Usually ' H1C')
+    #                  pegRemoveAtomBacki     Atom in PEG that is removed when PEG is bonded
+    #                                             to a following atom. (Usually ' H2C')
+    #                  pegBondAtomFront       Atom in PEG that is bonded to when PEG is bonded
+    #                                             to a previous atom. (Usually ' C1 ')
+    #                  pegBondAtomBack        Atom in PEG that is bonded to when PEG is bonded
+    #                                             to a following atom. (Usually ' C2 ')
+    #                 
+    # numPEG       This is the desired length of the PEG chain (number of PEG monomers).
+
+    # Actions:
+    # Given the proper inputs, a PEG will be attached at the specified residue.
+    # The polymer is created one monomer at a time until the desired length has been achieved.
+    # Each monomer is added in a random rotation around the bond formed between it and the 
+    #     previous monomer.
+    # Numbering and properties of the protein and PEG are modified as needed to produce a valid
+    #     PDB format.
+    # If a monomer cannot be placed after trying 15 rotations, the previous monomer is removed
+    #     and placed in a new rotation, after which PEG extension is again attempted.
+    # If a certain monomer is backtracked to 5 times, it is removed and PEG extension begins at
+    #     the monomer before it.
+    # If there are 5 times as many removals of a placed PEG as there are PEGs to be added, the
+    #     script is ended. The PEGylated protein is still returned, but an error message is 
+    #     generated, and the PEG will be shorter than specified.
+    # Finally, an array of Atoms with the protein and PEG is returned, ready
+    #     to be output as a PDB file.
+
+    # Outputs:
+    # An array of "KPI.Atoms" representing the PEGylated protein.
+
+    protAtom = copy.deepcopy(protAtom)
+    pegAtom = copy.deepcopy(pegAtom)
+    numPEGadded = 0
+    myPEGs = []
+    removals = 0
+    maxRemovals = 5*numPEG
+    for i in range(numPEG):
+        myPEGs.append(Monomer())
+    while numPEGadded < numPEG:
+        if numPEGadded % 50 == 0:
+            print(numPEGadded, "pegs added.")
+        if numPEGadded == 0:
+            if addMonomer(protAtom, pegAtom, myPEGs, numPEGadded, atomNames, resSeq):
+                numPEGadded+=1
+            else:
+                print("Unable to place first PEG.",
+                    "Make sure given residue, atom name, and file are correct and that the residue has surface accessibility")
+                quit()
+        else:
+            if addMonomer(protAtom, pegAtom, myPEGs, numPEGadded, atomNames):
+                numPEGadded+=1
+            else:
+                if removals > maxRemovals:
+                    print("Unable to create a sufficiently long polymer.")
+                    print("Created a chain ", numPEGadded, " PEGS long.")
+                    myPEGs = myPEGs[0:numPEGadded]
+                    break
+                else:
+                    while True:
+                        removeMonomer(myPEGs, numPEGadded, protAtom, resSeq)
+                        removals += 1
+                        numPEGadded -= 1
+                        if myPEGs[numPEGadded-1].timesBacktracked < 5 or numPEGadded == 0:
+                            break
+                        elif myPEGs[numPEGadded-1].timesBacktracked == 5:
+                            print("PEG", numPEGadded, "has been backtracked to 5 times.")
+                            myPEGs[numPEGadded-1].timesBacktracked = 0
+                    
+    return insertPEGAtoms(myPEGs, protAtom)#}}}
+##########################################################
+
+
+#-------------- CHARMM FF and data file -----------------
 ###################### catPRM ###########################
 def catPRM(fileNameNew, arrPRM) :#{{{
     # Inputs
@@ -705,8 +1389,20 @@ def lammpsRepX_inputWorld(startTemp, endTemp, delta) :#{{{
 #########################################################
 
 
+#------------------- Error Checks -----------------------
 ############## errorCheck_SEQREStoATOM ##################
 def errorCheck_SEQREStoATOM(fileName) : #{{{
+    # This check is to compare a .pdb file that has been downloaded from the internet. It will check sequence consistiency between the
+    # the SEQRES section to the ATOM section. The ATOM section is considered more correct.
+    # Inputs:
+    # fileName        This is the file name of you .pdb file you got from the internet
+
+    # Actions :
+    # Will read the pdb and check if there are insertions to homology sequence (ex. 49 50 50A 51...)
+    # Will directly compre the sequence in ATOM and the sequence in SEQRES to check if they are identical
+
+    # Outputs:
+    # Nothing is outputted, will print to screen if anything is wrong
 
     arrSEQRES = [] # residue sequence as devined in SEQRES section
     arrPDBRES = [] # residue type in the pdb
@@ -747,6 +1443,7 @@ def errorCheck_SEQREStoATOM(fileName) : #{{{
                 print("Error occured on sequence number: %s\n" % (additionStr))
 
     print("ATOM section contains %i residues" % len(arrPDBRES))
+    PDBfile.close()
 
     if   len(arrSEQRES) > len(arrPDBRES) : maxRES = len(arrSEQRES)
     elif len(arrPDBRES) > len(arrSEQRES) : maxRES = len(arrPDBRES)
@@ -784,6 +1481,7 @@ def errorCheck_ATOM(fileName) : #{{{
             else : 
                 print("ERROR: numbering is off count on residue %i" % resSeq)
                 pdbSeq = pdbSeq + (resSeq-pdbSeq)
+    PDBfile.close()
 #}}}
 #########################################################
 
@@ -944,6 +1642,12 @@ def mbarNC_screenDCD_to_nc (top_file, sim_timestep, config_file, distance_multip
     # config_file = screen
     # distance_multiplier = 1.2 # Multiplier used to create the neighborhood list of "made" native contacts (1.2 is std)
     
+    # Output:
+    # Text files containing a string of 1's and 0's for each timestep.
+    # The files will be called nc.[temperature]
+    # 1 means the contact was made, 0 means it wasn't.
+    # Order of contacts is the same as that of the param file in the directory.
+    
     import MDAnalysis as mda
     
     print("\nBegining native contact analysis using .dcd files...")
@@ -1064,7 +1768,6 @@ def mbarNC_screenDCD_to_nc (top_file, sim_timestep, config_file, distance_multip
     print("Writing output files...")
     for i in range(numBoxes):
         with open("nc." + str(int(tempRange[i])), 'w') as writeFile:
-    
             header_string = "# File \"" + "nc." + str(int(tempRange[i])) + "\". "
             header_string +=  "Created " + str(datetime.now()) + ".\n"
             header_string += "# Total native contacts: " + str(len(nc_array))  + "\n"
@@ -1409,5 +2112,319 @@ def mbarPrep_box_and_nc_to_mbar(maxRows):#{{{
     print("MBAR preparations are finished. Ready for MBAR analysis.\n")#}}}
 #########################################################
     
-    
-    
+
+######## mbarPrep_box_and_nc_to_mbar_domain #############
+def mbarPrep_box_and_nc_to_mbar_domain(maxRows,domainAA,NCmodFile):#{{{
+    # Read-in data from box.# and nc.# files and put them in mbar-readable format
+    boxFiles = glob_box()
+    ncFiles = glob_nc()
+    numBoxes = len(boxFiles)
+    if len(ncFiles) != numBoxes : 
+        print("Number of native contact files do not match number of box files!")
+        quit()
+
+    arrTemp = np.zeros(numBoxes)
+
+    # Grab relevent data from box.* files
+    for i, file in enumerate(boxFiles):
+        posStep   = -1
+        posTemp   = -1
+        posPotEng = -1
+        posTotEng = -1
+        boxTemp = int(file.split(".")[1])
+
+        # Print status
+        print ("Reading file: box", boxTemp)
+
+        # Search the header to find col positions for important data
+        fileTMP = open(file)
+        line = fileTMP.readline()
+        count = 0
+        for j in range(0, len(line.split())) :
+            if line.split()[j] == "Step" : posStep = count
+            if line.split()[j] == "Temp" : posTemp = count
+            if line.split()[j] == "PotEng" : posPotEng = count
+            if line.split()[j] == "TotEng" : posTotEng = count
+            count += 1
+        fileTMP.close()
+
+        # Check to make sure col positions are defined
+        if posStep < 0 : print("\"Step\" column undefined")
+        if posTemp < 0 : print("\"Temp\" column undefined")
+        if posPotEng < 0 : print("\"PotEng\" column undefined")
+        if posTotEng < 0 : print("\"TotEng\" column undefined")
+
+        # Read-in and save Temperature, Total Energy and Potential energy
+        data = np.loadtxt(file,skiprows=1)
+        arrTemp[i] = boxTemp
+        col = data[:,posTotEng]
+        if i == 0 : arrTE = col.copy()
+        if i > 0  : arrTE = np.vstack([arrTE,col])
+        col = data[:,posPotEng]
+        if i == 0 : arrPE = col.copy()
+        if i > 0  : arrPE = np.vstack([arrPE,col])
+    #------
+
+    # Grab relevent data from nc.* files 
+    # Section defines 'domain' NC data
+    def referenceDomains(NCmodFile) :
+        readFile = open(NCmodFile)
+        refDomainAA = []
+        for i,line in enumerate(readFile):
+            line = line.split()
+            if int(line[1]) in domainAA or int(line[2]) in domainAA :
+                refDomainAA.append(i)
+        readFile.close()
+        return refDomainAA
+    def domainPercentNC(refDomaAA,ncFile) :
+        readFile = open(ncFile)
+        colNC = []
+        for line in readFile :
+            if line[0] == "#" : continue
+            line = line.split()
+            line = line[2]
+            numerator = 0
+            denominator = 0
+            for item in refDomainAA :
+                refVal = line[item]
+                if   refVal == '0' : 
+                    denominator += 1
+                elif refVal == '1' : 
+                    denominator += 1
+                    numerator   += 1
+                else :
+                    print("string in %s contains something other than a 1 or 0: %s" % (ncFile,refVal))
+            colNC.append(numerator / denominator)
+        readFile.close()
+        return colNC
+
+    for i, file in enumerate(ncFiles) :
+        boxTemp = int(file.split(".")[1])
+        
+        # Print status
+        print ("Reading file: nc", boxTemp)
+
+        # Read-in and save total contats made column
+        #data = np.loadtxt(file, skiprows=2)
+        refDomainAA = referenceDomains(NCmodFile)
+        col = domainPercentNC(refDomainAA,file)
+        if i == 0 : arrNC = col.copy()
+        if i > 0  : arrNC = np.vstack([arrNC,col])
+    #------
+
+    # Limit total number of data points
+    print("\nDecreasing the number of timesteps to %i..." % (maxRows))
+    arrPET = arrPE.T
+    arrTET = arrTE.T
+    arrNCT = arrNC.T
+    if len(arrPET) != len(arrTET) : 
+        print("\nERROR: Your PE and TE timesteps do not match!!!\n")
+        quit()
+    elif len(arrPET) != len(arrNCT) : 
+        print("\nWARNING: Your Energetic and NC timesteps do not match.\n")
+        arrVal1 = [arrNCT]
+        limData(maxRows, arrVal1)
+        arrVal2 = [arrPET, arrTET]
+        limData(maxRows, arrVal2)
+        arrVal = [arrVal2[0], arrVal2[1], arrVal1[0]]
+    else:
+        print("Number of PE, TE and NC timesteps are equal.")
+        arrVal = [arrPET, arrTET, arrNCT]
+        limData(maxRows, arrVal)
+    arrPE = arrVal[0].T
+    arrTE = arrVal[1].T
+    arrNC = arrVal[2].T
+
+    currDirectory = "mbar_input"
+
+    # Write Directory
+    if not os.path.exists(currDirectory) : os.makedirs(currDirectory)
+    # Write Temperatures
+    pntFile = open(currDirectory + '/temperatures', 'w')
+    pntStr = ''.join('{:7}'.format(val) for val in arrTemp)
+    pntFile.write(pntStr)
+    pntFile.close()
+    # Write Total Energies
+    pntFile = open(currDirectory + '/total-energies', 'w')
+    pntStr = ''
+    for row in arrTE.T :
+        pntRow = ' '.join('{:12}'.format(val) for val in row)
+        pntStr += pntRow + '\n'
+    pntFile.write(pntStr)
+    pntFile.close()
+    # Write Potential Energies
+    pntFile = open(currDirectory + '/potential-energies', 'w')
+    pntStr = ''
+    for row in arrPE.T :
+        pntRow = ' '.join('{:12}'.format(val) for val in row)
+        pntStr += pntRow + '\n'
+    pntFile.write(pntStr)
+    pntFile.close()
+    # Write Native Contacts
+    pntFile = open(currDirectory + '/contact_info', 'w')
+    pntStr = ''
+    for row in arrNC.T :
+        pntRow = ' '.join('{:12}'.format(val) for val in row)
+        pntStr += pntRow + '\n'
+    pntFile.write(pntStr)
+    pntFile.close()
+
+    # Print status
+    for j in range(numBoxes) :
+        print ("Directory" , currDirectory, "contains PE, TE, contact and Temperature mbar inputs for box", int(arrTemp[j]))
+    print("MBAR preparations are finished. Ready for MBAR analysis.\n")#}}}
+#########################################################
+ 
+
+####################### shiftDCD ########################
+def shiftDCD(top_file, traj_file, outname, box_dims, x_atom, y_atom, z_atom):#{{{
+    #Import statements for MDAnalysis
+    import MDAnalysis as mda 
+    from MDAnalysis import transformations
+    from MDAnalysis.coordinates.LAMMPS import DCDWriter
+
+    #Box dimensions
+    x_lo = box_dims[0]
+    x_hi = box_dims[1]
+    y_lo = box_dims[2]
+    y_hi = box_dims[3]
+    z_lo = box_dims[4]
+    z_hi = box_dims[5]
+
+    #X atom vals
+    move_x = x_atom[0]
+    x_segname = x_atom[1]
+    x_resid = x_atom[2]
+    x_atom_name = x_atom[3]
+    x_orig = x_atom[4]
+
+    #Y atom vals
+    move_y = y_atom[0]
+    y_segname = y_atom[1]
+    y_resid = y_atom[2]
+    y_atom_name = y_atom[3]
+    y_orig = y_atom[4]
+
+    #Z atom vals
+    move_z = z_atom[0]
+    z_segname = z_atom[1]
+    z_resid = z_atom[2]
+    z_atom_name = z_atom[3]
+    z_orig = z_atom[4]
+
+    u = mda.Universe(top_file, traj_file)
+
+    new_traj = []
+
+    for ts in u.trajectory:
+        x_shift = 0
+        y_shift = 0
+        z_shift = 0
+        if(move_x):
+            x_atom = u.select_atoms("atom" + " " + x_segname + " " + str(x_resid) + " " + x_atom_name)
+            x_num = x_atom[0].position[0]
+            x_shift = x_orig - x_num
+        if(move_y):
+            y_atom = u.select_atoms("atom" + " " + y_segname + " " + str(y_resid) + " " + y_atom_name)
+            y_num = y_atom[0].position[1]
+            y_shift = y_orig - y_num
+        if(move_z):
+            z_atom = u.select_atoms("atom" + " " + z_segname + " " + str(z_resid) + " " + z_atom_name)
+            z_num = z_atom[0].position[2]
+            z_shift = z_orig - z_num
+        new_traj.append(transformations.translate([x_shift, y_shift, z_shift])(ts))
+
+    for i, ts in enumerate(new_traj):
+        if i%25 == 0:
+            print("Timestep", i)
+        for i in range(len(ts.positions)):
+            position = ts.positions[i]
+            x = position[0]
+            y = position[1]
+            z = position[2]
+            if x < x_lo:
+                x = x_hi + (x-x_lo)
+            elif x > x_hi:
+                x = x_lo + (x-x_hi)
+            if y < y_lo:
+                y = y_hi + (y-y_lo)
+            elif y > y_hi:
+                y = y_lo + (y-y_hi)
+            if z < z_lo:
+                z = z_hi + (z-z_lo)
+            elif z > z_hi:
+                z = z_lo + (z-z_hi)
+            position = [x, y, z]
+            ts.positions[i] = position
+
+    with DCDWriter(outname+".dcd", len(u.atoms)) as W:
+        for ts in new_traj:
+            W.write(ts)#}}}
+#########################################################
+
+
+######################## catDCD #########################
+def catDCD(top_file, basename, numFiles, outname):#{{{
+    import MDAnalysis as mda 
+    from MDAnalysis.coordinates.LAMMPS import DCDWriter
+
+    traj_files = []
+
+    for i in range(numFiles):
+        traj_files.append(basename + str(i+1) + ".dcd")
+
+    u = mda.Universe(top_file, traj_files)
+
+    with DCDWriter(outname, len(u.atoms)) as W:
+        for ts in u.trajectory:
+            W.write(ts)#}}}
+#########################################################
+
+
+######################## catLog #########################
+def catLog(basename, numFiles, outname, startLineFirst, endLineFirst, startLine, endLine):#{{{
+    log_files = []
+    lines = []
+
+    for i in range(numFiles):
+        log_files.append("log." + basename + str(i+1) + ".lammps")
+
+    with open(log_files[0]) as file:
+        for i in range(startLineFirst-1):
+            file.readline()
+        for i in range(endLineFirst-startLineFirst + 1): 
+            line = file.readline()
+            lines.append(line.lstrip())
+            if i == 2:
+                stepsBetween = int(line[:8])
+            if i == endLineFirst-startLineFirst:
+                lastNum = int(line[:8])
+
+    for filename in log_files[1:]:
+        with open(filename) as file:
+            for i in range(startLine-1):
+                file.readline()
+            for i in range(endLine-startLine + 1): 
+                line = file.readline()
+                lastNum = lastNum + stepsBetween
+                line = str(lastNum) + line[8:]
+                lines.append(line)
+
+    with open(outname, 'w') as file:
+        for line in lines:
+            file.write(line)#}}}
+#########################################################
+
+
+####################### excelPrep #######################
+def excelPrep(startLine, endLine, selectionCriteria):#{{{
+    filenames = gb.glob(selectionCriteria)
+
+    for filename in filenames:
+        with open(filename, 'r') as file:
+            lines = file.readlines()
+        newFilename = filename[:-7] + ".txt"
+        with open(newFilename, 'w') as newFile:
+            for line in lines[startLine-1:endLine]:
+                newFile.write(line.lstrip())#}}}
+#########################################################

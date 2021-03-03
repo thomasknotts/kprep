@@ -7,15 +7,17 @@
 
 #########################################################
 #--------------- Index of Function ----------------------
-# read_pdb          Reads .pdb files directly from the protein data bank website
-# readGO_pdb        Reads .pdb files produced by the mmtsb web server
-# read_rtf           Reads .rtf files to find an Atom's atomType (can be accomplished with readpsf)
-# readpsfprm        Reads the .psf file and relevent .prm files to define system parameters
-# readparam_GO      Reads .param files produced by the mmtsb web server
-# readLAMMPS_data  Reads .data files used in LAMMPS
-# readLAMMPS_nc     Reads .mod files that contain Native Contact (nc) (ie. NBFIX) information
-# readLAMMPS_aa     Reads .mod files that contain Amino Acid (aa) information
-# readKPREP_kp      Reads .kp files that contain KPI data-dump of variables
+# read_pdb            Reads .pdb files directly from the protein data bank website
+# readDiSulfides_pdb  Reads .pdb files directly from the protein data bank website for disulfide information
+# readGO_pdb          Reads .pdb files produced by the mmtsb web server
+# read_rtf            Reads .rtf files to find an Atom's atomType (can be accomplished with readpsf)
+# readpsfprm          Reads the .psf file and relevent .prm files to define system parameters
+# readparam_GO        Reads .param files produced by the mmtsb web server
+# editGO_DiSulfides   Takes a list of residues that participate in disulfide bonds and adds it to the list of bonds
+# readLAMMPS_data     Reads .data files used in LAMMPS
+# readLAMMPS_nc       Reads .mod files that contain Native Contact (nc) (ie. NBFIX) information
+# readLAMMPS_aa       Reads .mod files that contain Amino Acid (aa) information
+# readKPREP_kp        Reads .kp files that contain KPI data-dump of variables
 #--------------------------------------------------------
 # Note: All function in KPrepRead.py create new class variables.
 #       To modify an exitsing class variable see KPrepFunctions.py
@@ -30,6 +32,7 @@
 import KPrepInfo as KPI
 import re                   # re is short for regular expression
 import copy
+import numpy as np
 #########################################################
 
 
@@ -185,6 +188,47 @@ def read_pdb(fileName, HETATM=True):#{{{
     PDBfile.close()
     
     return arrAtom#}}}
+#########################################################
+
+
+################# readDiSulfides_pdb ####################
+def readDiSulfides_pdb(fileName) :#{{{
+    # PDB file format explained on the RCSB PDF literature: PDB File Format v. 3.3 page: 187
+    # Inputs:
+    # FileName      This is a PDB file
+
+    # Actions:
+    # Will read the pdb and extract a list of all residues that participate in disulfide bonds.
+
+    # Outputs:
+    # A list of all residues that participate in disulfide bonds. This list is meant to be used
+    #   by other process or functions. Doesn't output anything to a file.
+
+    # Set-up and Pre-define variables
+    arrDiS = []         # Array of all the disulfide residue pairs
+    i = 0               # Number of disulfide bonds in protein
+    
+    # Begin reading the pdb
+    print("Reading file %s for disulfide analysis" % (fileName))
+    PDBfile = open(fileName, 'r')
+    for line in PDBfile :
+        comment = line[0:6]
+        if comment == "SSBOND" :
+            i += 1
+            line = line.split()
+            arrDiS.append([int(line[4]), int(line[7])])
+    PDBfile.close()
+
+    # Put variable to be returned in martix format
+    arrDiS = np.matrix(arrDiS)
+
+    if i > 0 :
+        print("Found %i disulfide bond(s) in %s" % (i, fileName))
+    else :
+        print("Did not find any disulfide bonds in %s" % (fileName))
+        return []
+
+    return arrDiS#}}}
 #########################################################
 
 
@@ -654,7 +698,7 @@ def createNONBONDED(xatom, arrFileNamePRM) :#{{{
 #}}}
 
 def readpsfprm(fileNamePSF, arrFileNamePRM, arrAtom) :#{{{
-    # Inputs:
+    
     
     # Actions:
 
@@ -1104,6 +1148,73 @@ def readGO_param (fileName, BOND=True, ANGLE=True, DIHEDRAL=True, NONBONDED=True
     if NBFIX == True : arrReturn.append(arrNBfix)
 
     return arrReturn#}}}
+#########################################################
+
+
+################# editGO_DiSulfides #####################
+# Functions#{{{
+def distanceTwoPoints(X, Y, frst, scnd) :
+    dist = np.sqrt((X[0]-Y[0])**2 + (X[1]-Y[1])**2 + (X[2]-Y[2])**2)
+    if dist > 7 :
+        print("\nCAUTION: Distance between residues is large for a disulfide bond\n\
+                Residues: %i and %i; Distance = %.4f" % (frst, scnd, dist))
+    return dist
+
+
+def disulfideChecks(i, atom) :
+    # Begin checks
+    boolFail = False
+    if i != atom.atomNum : print("missmatch in reference")
+    if atom.resType != "CYS" : boolFail = True
+    # Print error message
+    if boolFail == True :
+        print("\nWARNING: Some data might be incorrect!\nResidue Number = %i; Residue type = %s" \
+             % (atom.atomNum, atom.resType))
+#}}}
+
+def editGO_DiSulfides(arrAtom, arrBond, arrDiSulfides) :#{{{
+    # Note: This is an edit that creates additional disulfide bondes for a Go model. It is assumed
+    #  that the user has already determined the disulfide bonds (see readDiSulfides_pdb) and transformed the
+    #  the list of participating amino acids to comply with the Go model pdb residue IDs
+
+    # Inputs: 
+    #arrAtom is the array of Go model amino acids and is used for reference only.
+    #arrBond is the array of already-created bonds from the Go model (see readGO_params)
+    #arrDiSulfides contains the information about the participating disulfide bonds in the protein.
+    #  assumed is that these numbers have already been transformed into the appropriate Go model residue IDs
+    
+    # Actions:
+    #First the distance between the amino acids is determined.
+    #Lastly the new bond is added to the system using the creatGoBOND function from readGo_param
+
+    # Outputs:
+    #arrBondNew is the updated list of bonds in the system that contains the new disulfide bonds
+
+    # Set-up and Pre-define variables
+    DiS_bondEnergy = 378.00 
+    arrBondNew = arrBond.copy()
+    length = len(arrDiSulfides)
+    numBonds = len(arrBond)
+    
+    if length == 0 : return arrBond
+
+    # Determine residues, check information, calculate distance and create new bond
+    for i in range(length) :
+        frst = arrDiSulfides[i,0]
+        scnd = arrDiSulfides[i,1]
+        frstAA = arrAtom[frst-1]
+        scndAA = arrAtom[scnd-1]
+        disulfideChecks(frst, frstAA)
+        disulfideChecks(scnd, scndAA)
+        frstCoord = frstAA.coordinates
+        scndCoord = scndAA.coordinates
+        dist = distanceTwoPoints(frstCoord, scndCoord, frst, scnd)
+        strBond = " %i  %i  %.3f  %.4f " %(frst, scnd, DiS_bondEnergy, dist)
+        bondNum = numBonds + i + 1
+        arrBondNew.append(createGoBOND(strBond, bondNum))
+
+    return arrBondNew
+#}}}
 #########################################################
 
 
