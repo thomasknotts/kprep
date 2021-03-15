@@ -1,0 +1,19 @@
+This is a very basic example of how to use KPrep to read files from
+the web servers we use in this group, and output files that are ready
+for simulation. The all-atom example is for CHARMM simulation, and 
+the coarse-grain example is for LAMMPS simuation using the USER-KNOTTS
+package. 
+
+The all-atom example shows how you can customize atom objects easily
+if you need to make changes to the read file.
+
+The coarse-grain example shows how you can take the complicated 
+process of transforming simulations inputs, and makes it easy to 
+read, modify (if necessary) and output.
+
+For more information about KPrep please see the lab notebook section
+titled KPrep.
+
+To run the example simply run the KPrepExamply.py script. This script
+has been marked to show how each of the different Kprep packages are 
+interconnected.

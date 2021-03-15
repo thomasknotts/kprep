@@ -1,0 +1,24 @@
+In this example we will be mutating and then PEGylating the protein PDB ID: 1XPB
+While these will be done together, they can be done separate. The user is 
+responsible to identify where changes need to be made so the scripts run on 
+their model. A more detailed explaination of the variables and functions can be
+found on the group lab notebook: KPrep/All-atom PEGylation.
+
+The general procedure will be as follows:
+1. Mutate the residue
+2. Generate PEG on the mutated residue
+
+The mutant used in the example is PDC as this is commonly used in-lab to site-
+specifically PEGylate a protein. PDC and PEG coordinates are included and
+are necessary for this example. However, PDC can be swapped for another mutant, 
+the only requirement for alternate mutants is a proper PDB coordinate file.
+
+Step 1: Mutate the proper residue
+- Input the proper USER variables in s-mutateResidue.py script
+- run the python script s-AllAtom.mutateResidue.py
+
+Step 2: Generate the PEG monomer attached to our mutant
+- Input the proper USER and PDB-BASED variables in s-AllAtom.genPEG.py
+  -- In this example we want to PEGylate on the mutant residue, thus 
+     pegRes = resSeq (from mutateResidue)
+- run the python script s-AllAtom.genPEG.py

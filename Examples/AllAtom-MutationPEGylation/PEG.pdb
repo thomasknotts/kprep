@@ -1,0 +1,19 @@
+ATOM      1  C1  PEGM    1      -0.079   0.076  -0.001  0.00  0.00           C  
+ATOM      2  C2  PEGM    1       1.487   1.479   1.048  0.00  0.00           C  
+ATOM      3  H2B PEGM    1       2.046   0.624   1.442  0.00  0.00           H  
+ATOM      4  H2A PEGM    1       0.749   1.818   1.782  0.00  0.00           H  
+ATOM      5  H2C PEGM    1       2.188   2.295   0.855  0.00  0.00           H  
+ATOM      6  O1  PEGM    1       0.851   1.136  -0.175  0.00  0.00           O  
+ATOM      7  H1C PEGM    1      -0.536  -0.145  -0.969  0.00  0.00           H  
+ATOM      8  H1B PEGM    1       0.429  -0.824   0.360  0.00  0.00           H  
+ATOM      9  H1A PEGM    1      -0.868   0.369   0.699  0.00  0.00           H  
+CONECT    1    6    7    8    9
+CONECT    2    3    4    5    6
+CONECT    3    2
+CONECT    4    2
+CONECT    5    2
+CONECT    6    1    2
+CONECT    7    1
+CONECT    8    1
+CONECT    9    1
+END
