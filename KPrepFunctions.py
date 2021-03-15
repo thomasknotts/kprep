@@ -794,7 +794,7 @@ def resClashes(resAtom, protAtom):#{{{
                     distance = np.sqrt((x1-x2)**2 + (y1-y2)**2 + (z1-z2)**2)
                     minDistance = r1 + r2
                     if distance < minDistance:
-                        print(atom1.atomName, atom1.resSeq, atom1.coordinates, atom2.atomName, atom2.resSeq, atom2.coordinates)
+                        # print(atom1.atomName, atom1.resSeq, atom1.coordinates, atom2.atomName, atom2.resSeq, atom2.coordinates) # For error checking, reports clashes. Feature could be added that reports why a mutant isn't being generated if too many clashes occur.
                         return True
     return False#}}}
 
